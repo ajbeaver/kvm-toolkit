@@ -1,9 +1,9 @@
 #!/bin/bash
 # setup-vm - KVM/QEMU Virtual Machine Manager & Installer
-# Version: 2.0.1
+# Version: 2.0.2
 # Usage: setup-vm [command] [options]
 
-VERSION="2.0.1"
+VERSION="2.0.2"
 SRC_DIR="$HOME/Documents/Source"
 ISO_DIR="$HOME/Documents/ISOs"
 DISK_DIR="/var/lib/libvirt/images"
