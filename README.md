@@ -111,5 +111,4 @@ See `docs/network-fix.md` for a detailed explanation of the Arch Linux libvirt n
 
 ## License
 
-MIT License
-```
+MIT License. See `LICENSE` for details.
