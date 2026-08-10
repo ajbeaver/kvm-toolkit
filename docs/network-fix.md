@@ -1,6 +1,3 @@
-Here is the content for `docs/network-fix.md`. It documents the specific issues encountered with Kali/Parrot installers on Arch Linux and the two-part solution implemented in your toolkit.
-
-```markdown
 # Network Connectivity Fix for KVM VMs
 
 This document explains the common network connectivity issues encountered when installing security distributions (Kali Linux, Parrot OS) in a KVM/QEMU environment on Arch Linux, and the solutions implemented in this toolkit.
