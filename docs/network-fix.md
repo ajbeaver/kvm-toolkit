@@ -1,3 +1,6 @@
+Here is the content for `docs/network-fix.md`. It documents the specific issues encountered with Kali/Parrot installers on Arch Linux and the two-part solution implemented in your toolkit.
+
+```markdown
 # Network Connectivity Fix for KVM VMs
 
 This document explains the common network connectivity issues encountered when installing security distributions (Kali Linux, Parrot OS) in a KVM/QEMU environment on Arch Linux, and the solutions implemented in this toolkit.
@@ -40,3 +43,55 @@ sudo ufw route allow from 192.168.122.0/24
 
 # Reload UFW to apply changes
 sudo ufw reload
+```
+
+*Note: If you are using a specific physical interface (e.g., `eth0`), you can be more specific with the route rule: `sudo ufw route allow in on virbr0 out on eth0`.*
+
+## Troubleshooting Steps
+
+If a VM still fails to connect after creation:
+
+1.  **Check Interface Status (Inside VM):**
+    ```bash
+    ip link show eth0
+    # Should show state UP
+    ```
+
+2.  **Request DHCP (Inside VM):**
+    ```bash
+    sudo dhclient -v eth0
+    ```
+    If this times out, the firewall on the host is likely still blocking traffic.
+
+3.  **Verify Host Bridge:**
+    ```bash
+    sudo brctl show virbr0
+    # Should list vnet0 or similar
+    ```
+
+4.  **Switch Network Model:**
+    If `rtl8139` fails, shut down the VM and edit its configuration to use `e1000`:
+    ```bash
+    sudo virsh edit <vm-name>
+    # Change <model type='rtl8139'/> to <model type='e1000'/>
+    ```
+
+## Summary
+
+By combining a universally compatible network driver (`rtl8139`) with correct firewall forwarding rules, the `kvm-toolkit` ensures that VMs can connect to the internet immediately upon boot, eliminating the most common barrier to entry for Arch Linux KVM users.
+```
+
+### How to add this to your repo:
+1.  Create the file:
+    ```bash
+    mkdir -p docs
+    nano docs/network-fix.md
+    ```
+2.  Paste the content above.
+3.  Save and exit.
+4.  Commit and push:
+    ```bash
+    git add docs/network-fix.md
+    git commit -m "Add network troubleshooting documentation"
+    git push origin main
+    ```
