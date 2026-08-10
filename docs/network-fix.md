@@ -76,7 +76,6 @@ If a VM still fails to connect after creation:
 ## Summary
 
 By combining a universally compatible network driver (`rtl8139`) with correct firewall forwarding rules, the `kvm-toolkit` ensures that VMs can connect to the internet immediately upon boot, eliminating the most common barrier to entry for Arch Linux KVM users.
-```
 
 ### How to add this to your repo:
 1.  Create the file:
