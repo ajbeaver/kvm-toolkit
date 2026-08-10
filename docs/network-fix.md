@@ -1,0 +1,42 @@
+# Network Connectivity Fix for KVM VMs
+
+This document explains the common network connectivity issues encountered when installing security distributions (Kali Linux, Parrot OS) in a KVM/QEMU environment on Arch Linux, and the solutions implemented in this toolkit.
+
+## The Problem
+
+Users frequently report that VM installers fail to connect to the internet, displaying errors like "No network connection found" or "Cannot reach mirror servers," even when the host machine has internet access.
+
+This issue typically stems from two distinct factors:
+
+1.  **Driver Mismatch (Guest Side):**
+    By default, `virt-install` creates a VM with a `virtio` network interface. While `virtio` offers high performance, the minimal kernels used in Linux installer environments often lack the necessary `virtio_net` modules or fail to load them automatically. This results in the installer detecting the hardware but failing to establish a connection.
+
+2.  **Firewall Blocking (Host Side):**
+    On Arch Linux, firewalls like `ufw` (Uncomplicated Firewall) often block traffic in the `FORWARD` chain by default. This prevents DHCP requests and data packets from passing between the virtual bridge (`virbr0`) and the host's physical network interface, effectively isolating the VM.
+
+## The Solution
+
+The `setup-vm` tool in this toolkit addresses both issues automatically:
+
+### 1. Force Compatible Network Model
+Instead of relying on `virtio`, the script forces the use of the `rtl8139` network model.
+*   **Why:** `rtl8139` is a legacy driver supported by virtually every Linux kernel, including the minimal installer kernels of Kali and Parrot.
+*   **Implementation:** The script adds `--network network=default,model=rtl8139` to the `virt-install` command.
+*   **Alternative:** If `rtl8139` fails on specific hardware, `e1000` (Intel Gigabit) is a reliable secondary option.
+
+### 2. Configure Host Firewall (UFW)
+If `ufw` is active on the host, the toolkit (or the user) must allow traffic to pass through the virtual bridge.
+
+**Required UFW Rules:**
+Run these commands on the **Host** to allow VM traffic:
+
+```bash
+# Allow traffic on the virtual bridge interface
+sudo ufw allow in on virbr0
+sudo ufw allow out on virbr0
+
+# Allow forwarding from the VM subnet to the outside world
+sudo ufw route allow from 192.168.122.0/24
+
+# Reload UFW to apply changes
+sudo ufw reload
