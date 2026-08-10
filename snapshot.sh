@@ -1,268 +1,394 @@
 #!/bin/bash
+# snapshot - KVM/QEMU Snapshot Management Utility
+# Version: 1.1.0
+# Usage: snapshot <command> [options]
 
-# snapshot.sh - KVM Snapshot Management Utility
-# Part of the Arch Linux KVM Toolkit
+VERSION="1.1.0"
+DISK_DIR="/var/lib/libvirt/images"
 
-VERSION="1.0.0"
-SCRIPT_NAME=$(basename "$0" .sh)
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_DISPLAY_NAME="${SCRIPT_NAME%.sh}"
 
-# Colors for output (disabled for strict no-emoji/plain text requirement, using bold/standard)
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+info() { printf '%s\n' "$*"; }
+warn() { printf 'Warning: %s\n' "$*" >&2; }
+error() { printf 'Error: %s\n' "$*" >&2; }
 
 show_help() {
     cat << EOF
-Usage: $SCRIPT_NAME <command> [options]
+$SCRIPT_DISPLAY_NAME version $VERSION - KVM/QEMU snapshot manager
 
-KVM Snapshot Management Utility for Arch Linux.
+USAGE:
+    $SCRIPT_DISPLAY_NAME <command> [arguments]
 
-Commands:
-    create <vm_name> [tag]    Create a new snapshot. If tag is omitted, a timestamp is generated.
-    list <vm_name>            List all snapshots for a specific VM.
-    restore <vm_name> [tag]   Restore a VM to a specific snapshot.
-    delete <vm_name> [tag]    Delete a snapshot. Use 'all' to remove all snapshots.
+COMMANDS:
+    create <vm-name> [tag]    Create a snapshot; defaults to a timestamp tag
+    list <vm-name>            List snapshots for a VM
+    restore <vm-name> <tag>   Restore a shut-down VM to a snapshot
+    delete <vm-name> <tag>    Delete one snapshot; use tag 'all' to delete all
+    version                   Show version information
+    help                      Show this help message
 
-Options:
-    --help, -h                Show this help message.
-    --version, -v             Show version information.
+EXAMPLES:
+    $SCRIPT_DISPLAY_NAME create <vm-name>
+    $SCRIPT_DISPLAY_NAME create <vm-name> <snapshot-tag>
+    $SCRIPT_DISPLAY_NAME list <vm-name>
+    $SCRIPT_DISPLAY_NAME restore <vm-name> <snapshot-tag>
+    $SCRIPT_DISPLAY_NAME delete <vm-name> <snapshot-tag>
+    $SCRIPT_DISPLAY_NAME delete <vm-name> all
 
-Examples:
-    $SCRIPT_NAME create my-vm
-    $SCRIPT_NAME create my-vm before-update
-    $SCRIPT_NAME list my-vm
-    $SCRIPT_NAME restore my-vm before-update
-    $SCRIPT_NAME delete my-vm before-update
-    $SCRIPT_NAME delete my-vm all
-
+NOTES:
+    - setup-vm places its expected primary disk at $DISK_DIR/<vm-name>.qcow2.
+    - Snapshot operations use the domain's actual libvirt-managed storage.
+    - Restore requires the VM to be fully shut off.
 EOF
 }
 
 show_version() {
-    echo "$SCRIPT_NAME version $VERSION"
+    printf '%s version %s\n' "$SCRIPT_DISPLAY_NAME" "$VERSION"
 }
 
-# Helper function to print errors
-error() {
-    echo -e "${RED}Error: $1${NC}" >&2
-    exit 1
-}
+prompt_value() {
+    local prompt="$1"
+    local output_name="$2"
+    local value
 
-# Helper function to print warnings
-warn() {
-    echo -e "${YELLOW}Warning: $1${NC}" >&2
-}
-
-# Helper function to print success
-info() {
-    echo -e "${GREEN}$1${NC}"
-}
-
-# Check if a VM exists
-check_vm_exists() {
-    local vm_name="$1"
-    if ! sudo virsh dominfo "$vm_name" > /dev/null 2>&1; then
-        error "VM '$vm_name' does not exist."
+    if ! IFS= read -r -p "$prompt" value; then
+        printf '\n' >&2
+        error "Input cancelled or unavailable."
+        return 1
     fi
+    printf -v "$output_name" '%s' "$value"
 }
 
-# Check if a snapshot exists
-check_snapshot_exists() {
-    local vm_name="$1"
-    local tag="$2"
-    
-    # Get list of snapshot names
-    local snapshots
-    snapshots=$(sudo virsh snapshot-list --name "$vm_name" 2>/dev/null)
-    
-    if echo "$snapshots" | grep -q "^${tag}$"; then
-        return 0
-    else
+confirm_action() {
+    local prompt="$1"
+    local response
+
+    prompt_value "$prompt" response || return 1
+    [[ "$response" =~ ^[Yy]$ ]]
+}
+
+validate_vm_name() {
+    local name="$1"
+
+    if [[ ! "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]]; then
+        error "VM name must be 1-63 characters using letters, numbers, dots, underscores, or hyphens."
         return 1
     fi
 }
 
-cmd_create() {
+validate_snapshot_tag() {
+    local tag="$1"
+
+    if [[ ! "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+        error "Snapshot tag must be 1-128 characters using letters, numbers, dots, underscores, or hyphens."
+        return 1
+    fi
+}
+
+require_commands() {
+    local command_name
+    local missing=()
+
+    for command_name in sudo virsh; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            missing+=("$command_name")
+        fi
+    done
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        error "Missing required command(s): ${missing[*]}"
+        return 1
+    fi
+}
+
+check_libvirt() {
+    require_commands || return 1
+
+    if ! sudo -v; then
+        error "Sudo authentication failed or was cancelled."
+        return 1
+    fi
+    if ! sudo virsh list --all >/dev/null; then
+        error "Could not connect to the system libvirt instance."
+        return 1
+    fi
+}
+
+vm_exists() {
+    sudo virsh dominfo "$1" >/dev/null 2>&1
+}
+
+require_vm() {
+    local name="$1"
+
+    if ! vm_exists "$name"; then
+        error "VM '$name' does not exist."
+        return 1
+    fi
+}
+
+snapshot_exists() {
     local vm_name="$1"
     local tag="$2"
 
-    if [ -z "$vm_name" ]; then
-        error "VM name is required. Usage: $SCRIPT_NAME create <vm_name> [tag]"
+    sudo virsh snapshot-info "$vm_name" "$tag" >/dev/null 2>&1
+}
+
+get_snapshot_names() {
+    local vm_name="$1"
+    local output_name="$2"
+    local snapshot_output
+
+    if ! snapshot_output=$(sudo virsh snapshot-list --name "$vm_name"); then
+        error "Could not list snapshots for VM '$vm_name'."
+        return 1
+    fi
+    printf -v "$output_name" '%s' "$snapshot_output"
+}
+
+get_domain_state() {
+    local vm_name="$1"
+    local output_name="$2"
+    local domain_state
+
+    if ! domain_state=$(LC_ALL=C sudo virsh domstate "$vm_name" 2>/dev/null); then
+        error "Could not determine state for VM '$vm_name'."
+        return 1
+    fi
+    printf -v "$output_name" '%s' "$domain_state"
+}
+
+show_storage_context() {
+    local vm_name="$1"
+    local expected_disk="$DISK_DIR/${vm_name}.qcow2"
+    local block_output disk_sources source
+    local expected_found=false
+
+    if ! block_output=$(sudo virsh domblklist "$vm_name" --details 2>/dev/null); then
+        error "Could not inspect storage attached to VM '$vm_name'."
+        return 1
     fi
 
-    check_vm_exists "$vm_name"
+    disk_sources=$(printf '%s\n' "$block_output" | awk '$2 == "disk" && $4 != "-" { print $4 }')
+    if [ -z "$disk_sources" ]; then
+        error "VM '$vm_name' has no file-backed disk visible to libvirt."
+        return 1
+    fi
+
+    info "VM storage managed by libvirt:"
+    while IFS= read -r source; do
+        [ -n "$source" ] || continue
+        info "  $source"
+        if [ "$source" = "$expected_disk" ]; then
+            expected_found=true
+        fi
+    done <<< "$disk_sources"
+
+    if [ "$expected_found" != true ]; then
+        warn "Primary setup-vm path is not attached: $expected_disk"
+        warn "Snapshot will follow the domain's actual libvirt storage shown above."
+    fi
+}
+
+cmd_create() {
+    local vm_name="${1:-}"
+    local tag="${2:-}"
+    local state
+
+    if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+        error "Usage: $SCRIPT_DISPLAY_NAME create <vm-name> [tag]"
+        return 2
+    fi
+    validate_vm_name "$vm_name" || return 1
 
     if [ -z "$tag" ]; then
-        # Generate timestamp tag: YYYY-MM-DD-HHMM
-        tag=$(date +"%Y-%m-%d-%H%M")
+        tag=$(date +'%Y-%m-%d-%H%M%S')
+    fi
+    validate_snapshot_tag "$tag" || return 1
+    if [ "$tag" = "all" ]; then
+        error "Snapshot tag 'all' is reserved by the delete command."
+        return 1
+    fi
+    check_libvirt || return 1
+    require_vm "$vm_name" || return 1
+    if snapshot_exists "$vm_name" "$tag"; then
+        error "Snapshot '$tag' already exists for VM '$vm_name'."
+        return 1
     fi
 
-    # Check if snapshot already exists to avoid conflicts
-    if check_snapshot_exists "$vm_name" "$tag"; then
-        error "Snapshot '$tag' already exists for VM '$vm_name'. Please choose a different tag."
+    get_domain_state "$vm_name" state || return 1
+    show_storage_context "$vm_name" || return 1
+    info "VM state: $state"
+    if [ "$state" != "shut off" ]; then
+        warn "Creating a snapshot while the VM is '$state' may briefly pause guest I/O."
     fi
 
     info "Creating snapshot '$tag' for VM '$vm_name'..."
-    
-    # Create the snapshot
-    # Note: --no-metadata is often safer for scripts to avoid cluttering libvirt metadata if not needed,
-    # but standard create-as usually works fine. We use standard flags.
-    if sudo virsh snapshot-create-as "$vm_name" "$tag" "Snapshot created by $SCRIPT_NAME" --no-current; then
-        info "Snapshot '$tag' created successfully."
-    else
-        error "Failed to create snapshot."
+    if ! sudo virsh snapshot-create-as "$vm_name" "$tag" "Snapshot created by $SCRIPT_DISPLAY_NAME" --no-current; then
+        error "Failed to create snapshot '$tag'."
+        return 1
     fi
+    info "Snapshot '$tag' created successfully."
 }
 
 cmd_list() {
-    local vm_name="$1"
-
-    if [ -z "$vm_name" ]; then
-        error "VM name is required. Usage: $SCRIPT_NAME list <vm_name>"
-    fi
-
-    check_vm_exists "$vm_name"
-
-    echo "Snapshots for VM: $vm_name"
-    echo "----------------------------------------"
-    
-    # Use --name to get just the list, then format
+    local vm_name="${1:-}"
     local snapshots
-    snapshots=$(sudo virsh snapshot-list --name "$vm_name" 2>/dev/null)
-    
-    if [ -z "$snapshots" ]; then
-        echo "No snapshots found."
-    else
-        echo "$snapshots" | while read -r snap; do
-            if [ -n "$snap" ]; then
-                echo "- $snap"
-            fi
-        done
+
+    if [ "$#" -ne 1 ]; then
+        error "Usage: $SCRIPT_DISPLAY_NAME list <vm-name>"
+        return 2
     fi
+    validate_vm_name "$vm_name" || return 1
+    check_libvirt || return 1
+    require_vm "$vm_name" || return 1
+    get_snapshot_names "$vm_name" snapshots || return 1
+
+    info "Snapshots for VM '$vm_name':"
+    if [ -z "$snapshots" ]; then
+        info "  (none)"
+        return 0
+    fi
+
+    while IFS= read -r snapshot_name; do
+        [ -n "$snapshot_name" ] && info "  $snapshot_name"
+    done <<< "$snapshots"
 }
 
 cmd_restore() {
-    local vm_name="$1"
-    local tag="$2"
-
-    if [ -z "$vm_name" ]; then
-        error "VM name is required. Usage: $SCRIPT_NAME restore <vm_name> [tag]"
-    fi
-
-    check_vm_exists "$vm_name"
-
-    if [ -z "$tag" ]; then
-        error "Snapshot tag is required for restore. Usage: $SCRIPT_NAME restore <vm_name> <tag>"
-    fi
-
-    if ! check_snapshot_exists "$vm_name" "$tag"; then
-        error "Snapshot '$tag' not found for VM '$vm_name'."
-    fi
-
-    # Check if VM is running
+    local vm_name="${1:-}"
+    local tag="${2:-}"
     local state
-    state=$(sudo virsh domstate "$vm_name" 2>/dev/null)
-    
-    if [ "$state" = "running" ]; then
-        error "VM '$vm_name' is currently running. You must shut it down before restoring a snapshot."
+
+    if [ "$#" -ne 2 ]; then
+        error "Usage: $SCRIPT_DISPLAY_NAME restore <vm-name> <tag>"
+        return 2
+    fi
+    validate_vm_name "$vm_name" || return 1
+    validate_snapshot_tag "$tag" || return 1
+    check_libvirt || return 1
+    require_vm "$vm_name" || return 1
+    if ! snapshot_exists "$vm_name" "$tag"; then
+        error "Snapshot '$tag' not found for VM '$vm_name'."
+        return 1
+    fi
+    get_domain_state "$vm_name" state || return 1
+    if [ "$state" != "shut off" ]; then
+        error "VM '$vm_name' must be fully shut off before restore; current state is '$state'."
+        return 1
     fi
 
-    warn "Restoring VM '$vm_name' to snapshot '$tag'..."
-    warn "This operation cannot be undone."
-    
-    if sudo virsh snapshot-revert "$vm_name" "$tag"; then
-        info "VM '$vm_name' restored to snapshot '$tag'."
-    else
-        error "Failed to restore snapshot."
+    show_storage_context "$vm_name" || return 1
+    warn "Restore will replace the current VM state with snapshot '$tag'."
+    if ! confirm_action "Restore VM '$vm_name' to '$tag'? (y/N): "; then
+        info "Cancelled; the VM was not changed."
+        return 0
     fi
+
+    if ! sudo virsh snapshot-revert "$vm_name" "$tag"; then
+        error "Failed to restore snapshot '$tag'."
+        return 1
+    fi
+    info "VM '$vm_name' restored to snapshot '$tag'."
+}
+
+delete_all_snapshots() {
+    local vm_name="$1"
+    local snapshots snapshot_name
+    local failures=0
+
+    get_snapshot_names "$vm_name" snapshots || return 1
+    if [ -z "$snapshots" ]; then
+        info "No snapshots to delete."
+        return 0
+    fi
+
+    warn "Every snapshot for VM '$vm_name' will be permanently deleted."
+    if ! confirm_action "Delete all snapshots for '$vm_name'? (y/N): "; then
+        info "Cancelled; no snapshots were deleted."
+        return 0
+    fi
+
+    while IFS= read -r snapshot_name; do
+        [ -n "$snapshot_name" ] || continue
+        if sudo virsh snapshot-delete "$vm_name" "$snapshot_name"; then
+            info "Deleted snapshot: $snapshot_name"
+        else
+            error "Failed to delete snapshot: $snapshot_name"
+            failures=$((failures + 1))
+        fi
+    done <<< "$snapshots"
+
+    if [ "$failures" -ne 0 ]; then
+        error "$failures snapshot deletion(s) failed. Review the remaining snapshot list."
+        return 1
+    fi
+    info "All snapshots deleted."
 }
 
 cmd_delete() {
-    local vm_name="$1"
-    local tag="$2"
+    local vm_name="${1:-}"
+    local tag="${2:-}"
 
-    if [ -z "$vm_name" ]; then
-        error "VM name is required. Usage: $SCRIPT_NAME delete <vm_name> <tag>"
+    if [ "$#" -ne 2 ]; then
+        error "Usage: $SCRIPT_DISPLAY_NAME delete <vm-name> <tag|all>"
+        return 2
     fi
-
-    check_vm_exists "$vm_name"
-
-    if [ -z "$tag" ]; then
-        error "Snapshot tag is required. Use 'all' to delete all snapshots. Usage: $SCRIPT_NAME delete <vm_name> <tag>"
-    fi
+    validate_vm_name "$vm_name" || return 1
+    validate_snapshot_tag "$tag" || return 1
+    check_libvirt || return 1
+    require_vm "$vm_name" || return 1
 
     if [ "$tag" = "all" ]; then
-        local snapshots
-        snapshots=$(sudo virsh snapshot-list --name "$vm_name" 2>/dev/null)
-        
-        if [ -z "$snapshots" ]; then
-            info "No snapshots to delete."
-            return 0
-        fi
-
-        warn "Deleting ALL snapshots for VM '$vm_name'..."
-        echo "$snapshots" | while read -r snap; do
-            if [ -n "$snap" ]; then
-                if sudo virsh snapshot-delete "$vm_name" "$snap"; then
-                    info "Deleted snapshot: $snap"
-                else
-                    error "Failed to delete snapshot: $snap"
-                fi
-            fi
-        done
-        info "All snapshots deleted."
-    else
-        if ! check_snapshot_exists "$vm_name" "$tag"; then
-            error "Snapshot '$tag' not found for VM '$vm_name'."
-        fi
-
-        warn "Deleting snapshot '$tag' for VM '$vm_name'..."
-        if sudo virsh snapshot-delete "$vm_name" "$tag"; then
-            info "Snapshot '$tag' deleted successfully."
-        else
-            error "Failed to delete snapshot."
-        fi
+        delete_all_snapshots "$vm_name"
+        return $?
     fi
+    if ! snapshot_exists "$vm_name" "$tag"; then
+        error "Snapshot '$tag' not found for VM '$vm_name'."
+        return 1
+    fi
+
+    warn "Snapshot '$tag' for VM '$vm_name' will be permanently deleted."
+    if ! confirm_action "Delete snapshot '$tag'? (y/N): "; then
+        info "Cancelled; the snapshot was not deleted."
+        return 0
+    fi
+    if ! sudo virsh snapshot-delete "$vm_name" "$tag"; then
+        error "Failed to delete snapshot '$tag'."
+        return 1
+    fi
+    info "Snapshot '$tag' deleted successfully."
 }
 
-# Main execution logic
 main() {
-    # Handle flags first
-    if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-        show_help
-        exit 0
-    fi
+    local command="${1:-help}"
 
-    if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
-        show_version
-        exit 0
-    fi
-
-    local command="$1"
-    shift
-
-    case "$command" in
-        create)
-            cmd_create "$@"
+    case $command in
+        version|--version|-v)
+            show_version
+            return 0
             ;;
-        list)
-            cmd_list "$@"
+        help|--help|-h)
+            show_help
+            return 0
             ;;
-        restore)
-            cmd_restore "$@"
-            ;;
-        delete)
-            cmd_delete "$@"
-            ;;
-        "")
-            error "No command specified. Use --help for usage."
+        create|list|restore|delete)
+            shift
             ;;
         *)
-            error "Unknown command: $command. Use --help for usage."
+            error "Unknown command: $command"
+            show_help >&2
+            return 2
             ;;
+    esac
+
+    case $command in
+        create) cmd_create "$@" ;;
+        list) cmd_list "$@" ;;
+        restore) cmd_restore "$@" ;;
+        delete) cmd_delete "$@" ;;
     esac
 }
 
-# Run main function with all arguments
 main "$@"

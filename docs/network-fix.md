@@ -16,7 +16,7 @@ This issue typically stems from two distinct factors:
 
 ## The Solution
 
-The `setup-vm` tool in this toolkit addresses both issues automatically:
+The `setup-vm` tool addresses guest-driver compatibility and configures the libvirt default NAT network. Host firewall policy remains an explicit administrator responsibility:
 
 ### 1. Force Compatible Network Model
 Instead of relying on `virtio`, the script forces the use of the `rtl8139` network model.
@@ -25,7 +25,7 @@ Instead of relying on `virtio`, the script forces the use of the `rtl8139` netwo
 *   **Alternative:** If `rtl8139` fails on specific hardware, `e1000` (Intel Gigabit) is a reliable secondary option.
 
 ### 2. Configure Host Firewall (UFW)
-If `ufw` is active on the host, the toolkit (or the user) must allow traffic to pass through the virtual bridge.
+If `ufw` is active on the host, the administrator must allow traffic to pass through the virtual bridge. The toolkit does not change UFW rules automatically.
 
 **Required UFW Rules:**
 Run these commands on the **Host** to allow VM traffic:
@@ -75,19 +75,4 @@ If a VM still fails to connect after creation:
 
 ## Summary
 
-By combining a universally compatible network driver (`rtl8139`) with correct firewall forwarding rules, the `kvm-toolkit` ensures that VMs can connect to the internet immediately upon boot, eliminating the most common barrier to entry for Arch Linux KVM users.
-
-### How to add this to your repo:
-1.  Create the file:
-    ```bash
-    mkdir -p docs
-    nano docs/network-fix.md
-    ```
-2.  Paste the content above.
-3.  Save and exit.
-4.  Commit and push:
-    ```bash
-    git add docs/network-fix.md
-    git commit -m "Add network troubleshooting documentation"
-    git push origin main
-    ```
+The toolkit combines a broadly compatible guest network model with a persistent libvirt NAT network. Host firewall forwarding remains under administrator control, making the network changes visible and deliberate.
